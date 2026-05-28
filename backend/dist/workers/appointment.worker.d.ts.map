@@ -1,0 +1,1 @@
+{"version":3,"file":"appointment.worker.d.ts","sourceRoot":"","sources":["../../src/workers/appointment.worker.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,MAAM,EAAE,MAAM,QAAQ,CAAC;AAKhC,OAAO,KAAK,EAAE,0BAA0B,EAAE,MAAM,WAAW,CAAC;AAU5D,wBAAgB,sBAAsB,IAAI,MAAM,CAAC,0BAA0B,CAAC,CAkC3E"}

@@ -1,0 +1,20 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.followupsRouter = void 0;
+const express_1 = require("express");
+const followups_controller_1 = require("./followups.controller");
+const auth_middleware_1 = require("../../middleware/auth.middleware");
+const tenant_middleware_1 = require("../../middleware/tenant.middleware");
+const validate_middleware_1 = require("../../middleware/validate.middleware");
+const followups_validation_1 = require("./followups.validation");
+exports.followupsRouter = (0, express_1.Router)();
+exports.followupsRouter.use(auth_middleware_1.authMiddleware, tenant_middleware_1.tenantMiddleware);
+exports.followupsRouter.get("/", (0, validate_middleware_1.validate)(followups_validation_1.FollowupFilterSchema, "query"), followups_controller_1.followupsController.list);
+exports.followupsRouter.post("/", (0, validate_middleware_1.validate)(followups_validation_1.CreateFollowupSchema), followups_controller_1.followupsController.create);
+exports.followupsRouter.patch("/:id/complete", followups_controller_1.followupsController.complete);
+exports.followupsRouter.patch("/:id/snooze", (0, validate_middleware_1.validate)(followups_validation_1.SnoozeFollowupSchema), followups_controller_1.followupsController.snooze);
+exports.followupsRouter.patch("/:id/cancel", followups_controller_1.followupsController.cancel);
+exports.followupsRouter.patch("/:id", (0, validate_middleware_1.validate)(followups_validation_1.UpdateFollowupSchema), followups_controller_1.followupsController.update);
+exports.followupsRouter.get("/:id", followups_controller_1.followupsController.get);
+exports.followupsRouter.delete("/:id", followups_controller_1.followupsController.delete);
+//# sourceMappingURL=followups.routes.js.map
