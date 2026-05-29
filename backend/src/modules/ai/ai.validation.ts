@@ -14,3 +14,12 @@ export const MemoryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(10),
   memory_type: z.enum(["fact", "preference", "summary", "intent", "context"]).optional(),
 });
+
+export const SuggestionQuerySchema = z.object({
+  tone:     z.enum(["professional", "friendly", "formal", "casual"]).default("professional"),
+  force_ai: z.coerce.boolean().default(false),
+});
+
+export type CreateMemoryInput      = z.infer<typeof CreateMemorySchema>;
+export type MemoryQueryInput        = z.infer<typeof MemoryQuerySchema>;
+export type SuggestionQueryInput    = z.infer<typeof SuggestionQuerySchema>;

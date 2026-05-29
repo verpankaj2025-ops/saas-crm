@@ -5,6 +5,13 @@ import type {
   CreateConversationDto, UpdateConversationDto, ConversationFilter,
 } from "./conversations.types";
 
+// Postgres error code for unique_violation — thrown when the partial
+// unique index (idx_conversations_unique_active) is violated.
+// PostgrestError exposes .code directly so no cast is needed.
+function isUniqueViolation(err: { code: string }): boolean {
+  return err.code === "23505";
+}
+
 const CONV_COLS =
   "id,workspace_id,contact_id,channel_id,status,subject,assigned_to," +
   "last_message_at,last_message_preview,unread_count,metadata,created_at,updated_at," +
@@ -105,36 +112,50 @@ export const conversationsRepository = {
 
   // ── Webhook helpers (no auth context) ───────────────────────
 
-  async findOpenByContactAndChannel(
-    workspaceId: UUID,
-    contactId: UUID,
-    channelId: UUID,
-  ): Promise<{ id: UUID } | null> {
-    const { data } = await db
-      .from("conversations")
-      .select("id")
-      .eq("workspace_id", workspaceId)
-      .eq("contact_id", contactId)
-      .eq("channel_id", channelId)
-      .in("status", ["open", "pending"])
-      .is("deleted_at", null)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    return (data as { id: UUID } | null) ?? null;
-  },
-
-  async createInbound(
+  // ── Idempotent inbound conversation resolver ─────────────────
+  // Uses optimistic insert: try to create, catch the unique_violation
+  // (error 23505) that fires when a concurrent process already created
+  // the conversation, then fall back to fetching the winner's row.
+  //
+  // This is safe because the DB partial unique index
+  // (idx_conversations_unique_active) guarantees at most one
+  // open/pending conversation per workspace+contact+channel pair.
+  async findOrCreateForInbound(
     workspaceId: UUID,
     dto: { contact_id: UUID; channel_id: UUID },
-  ): Promise<{ id: UUID }> {
+  ): Promise<{ id: UUID; created: boolean }> {
+    // Optimistic insert — fast path when no conversation exists yet
     const { data, error } = await db
       .from("conversations")
       .insert({ workspace_id: workspaceId, ...dto, status: "open" })
       .select("id")
       .single();
-    if (error) throw error;
-    return data as { id: UUID };
+
+    if (!error) {
+      return { ...(data as { id: UUID }), created: true };
+    }
+
+    // Unique violation: a concurrent process created the conversation
+    // between our check and our insert. Fetch the winning row.
+    if (isUniqueViolation(error)) {
+      const { data: existing } = await db
+        .from("conversations")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("contact_id", dto.contact_id)
+        .eq("channel_id", dto.channel_id)
+        .in("status", ["open", "pending"])
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existing) {
+        return { ...(existing as { id: UUID }), created: false };
+      }
+    }
+
+    throw error;
   },
 
   async incrementUnread(
@@ -143,24 +164,15 @@ export const conversationsRepository = {
     preview: string,
     lastAt: string,
   ): Promise<void> {
-    // Fetch current unread_count for atomic-enough increment (single worker per message)
-    const { data: cur } = await db
-      .from("conversations")
-      .select("unread_count")
-      .eq("id", conversationId)
-      .eq("workspace_id", workspaceId)
-      .maybeSingle();
-    const current = (cur as { unread_count: number } | null)?.unread_count ?? 0;
-
-    await db
-      .from("conversations")
-      .update({
-        unread_count:         current + 1,
-        last_message_at:      lastAt,
-        last_message_preview: preview.slice(0, 120),
-        updated_at:           new Date().toISOString(),
-      })
-      .eq("id", conversationId)
-      .eq("workspace_id", workspaceId);
+    // Atomic increment via DB function — avoids the read-modify-write
+    // race condition (unread_count = SELECT + 1) under concurrent messages.
+    // Defined in migration 002_conversation_uniqueness.sql.
+    const { error } = await db.rpc("increment_conversation_unread", {
+      p_conversation_id: conversationId,
+      p_workspace_id:    workspaceId,
+      p_preview:         preview.slice(0, 120),
+      p_last_at:         lastAt,
+    });
+    if (error) throw error;
   },
 };

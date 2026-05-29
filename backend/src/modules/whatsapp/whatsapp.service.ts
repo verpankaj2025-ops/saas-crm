@@ -1,4 +1,5 @@
 import { db } from "../../config/supabase";
+import { redis } from "../../config/redis";
 import { logger } from "../../lib/logger";
 import { emitToConversation, emitToWorkspace } from "../../sockets";
 import { whatsappQueue } from "../../queues";
@@ -15,6 +16,35 @@ import type {
   WhatsAppStatus,
 } from "./whatsapp.types";
 
+// ── Webhook idempotency lock ──────────────────────────────────
+// Prevents duplicate processing when Meta delivers the same wamid
+// to concurrent server instances or retries an in-flight event.
+//
+// Key design:  wh:lock:wa:{wamid}
+//   wh:lock:   webhook lock namespace (avoids collision with BullMQ / cache keys)
+//   wa:        provider namespace (future: email, sms, …)
+//   {wamid}    globally unique WhatsApp message ID from Meta
+//
+// TTL = 30 s: long past any realistic processing time, short enough
+// that genuine Meta retries (≥10 min) are never permanently blocked.
+// No explicit release — the TTL is the release mechanism, which keeps
+// the lock alive for the full window so DB-dedup-gap replays are also caught.
+
+const WH_LOCK_TTL_SECONDS = 30;
+
+async function acquireMessageLock(wamid: string): Promise<boolean> {
+  try {
+    const key    = `wh:lock:wa:${wamid}`;
+    const result = await redis.set(key, "1", "EX", WH_LOCK_TTL_SECONDS, "NX");
+    return result === "OK";
+  } catch (err) {
+    // Redis unavailable — degrade gracefully: allow processing and rely
+    // on the DB-level external_id dedup check as the fallback guard.
+    logger.warn("WhatsApp: Redis lock unavailable, falling back to DB dedup", { wamid, err });
+    return true;
+  }
+}
+
 // ── Channel lookup ────────────────────────────────────────────
 
 interface ChannelRow {
@@ -25,9 +55,23 @@ interface ChannelRow {
 
 // ── Helpers ───────────────────────────────────────────────────
 
+// Converts any phone string to E.164 format (+<digits>).
+// Strips all non-digit characters first, then prepends "+".
+// Throws if the input contains no digits — caller must validate
+// upstream (bad phone in DB should surface early, not reach Meta).
+//
+// normalizePhone("+1 (555) 234-5678") → "+15552345678"
+// normalizePhone("15552345678")       → "+15552345678"
+// normalizePhone("91 98765 43210")    → "+919876543210"
+// normalizePhone("++1234567890")      → "+1234567890"   (double-plus safe)
+// normalizePhone("")                  → throws
+// normalizePhone("abc")               → throws
 function normalizePhone(phone: string): string {
   const digits = phone.replace(/\D/g, "");
-  return digits.startsWith("+") ? digits : `+${digits}`;
+  if (!digits) {
+    throw new Error(`normalizePhone: no digits found in "${phone}"`);
+  }
+  return `+${digits}`;
 }
 
 async function findChannelById(
@@ -76,10 +120,21 @@ async function processMessage(
   wamsg: WhatsAppMessage,
   value: WhatsAppValue,
 ): Promise<void> {
-  // Idempotency: skip if already processed
+  // ── Layer 1: Redis idempotency lock ───────────────────────────
+  // Acquire before any DB work. If the lock is already held, another
+  // process is handling this exact wamid — skip immediately.
+  const locked = await acquireMessageLock(wamsg.id);
+  if (!locked) {
+    logger.debug("WhatsApp: wamid lock held by concurrent process, skipping", { wamid: wamsg.id });
+    return;
+  }
+
+  // ── Layer 2: DB dedup ─────────────────────────────────────────
+  // Catches genuine replays that arrive after the lock expires (>30 s)
+  // and the case where Redis was unavailable during lock acquisition.
   const dup = await messagesRepository.findByExternalId(workspaceId, wamsg.id);
   if (dup) {
-    logger.debug("WhatsApp: duplicate wamid, skipping", { wamid: wamsg.id });
+    logger.debug("WhatsApp: duplicate wamid in DB, skipping", { wamid: wamsg.id });
     return;
   }
 
@@ -96,17 +151,16 @@ async function processMessage(
   );
   logger.debug("WhatsApp: contact resolved", { contactId: contact.id });
 
-  // Find open conversation or create one
-  let convRow = await conversationsRepository.findOpenByContactAndChannel(
-    workspaceId,
-    contact.id,
-    channelId,
-  );
-  if (!convRow) {
-    convRow = await conversationsRepository.createInbound(workspaceId, {
-      contact_id: contact.id,
-      channel_id: channelId,
-    });
+  // Atomically find or create an open conversation.
+  // The DB partial unique index (idx_conversations_unique_active) ensures
+  // at most one open/pending conversation per contact+channel, even under
+  // concurrent webhook delivery. Conflict recovery is handled inside the
+  // repository — no duplicate conversations can result.
+  const convRow = await conversationsRepository.findOrCreateForInbound(workspaceId, {
+    contact_id: contact.id,
+    channel_id: channelId,
+  });
+  if (convRow.created) {
     logger.info("WhatsApp: new conversation created", { conversationId: convRow.id });
   }
 
@@ -182,12 +236,12 @@ export const whatsappService = {
       return;
     }
 
+    // Credentials are NOT stored in the job payload — worker resolves them from DB
     const jobData: WhatsAppOutboundJobData = {
       messageId:      opts.messageId,
       conversationId: opts.conversationId,
       workspaceId:    opts.workspaceId,
-      phoneNumberId:  config.phone_number_id,
-      accessToken:    config.access_token,
+      channelId:      opts.channelId,
       to:             normalizePhone(opts.contactPhone),
       content:        opts.content,
     };
@@ -205,10 +259,27 @@ export const whatsappService = {
   // ── Outbound: actual send (called by BullMQ worker) ───────
 
   async processOutboundJob(job: WhatsAppOutboundJobData): Promise<void> {
-    const { messageId, conversationId, workspaceId, phoneNumberId, accessToken, to, content } = job;
+    const { messageId, conversationId, workspaceId, channelId, to, content } = job;
+
+    // Resolve credentials from DB at execution time — never travel through Redis
+    const channel = await findChannelById(channelId, workspaceId);
+    if (!channel) {
+      logger.error("WhatsApp: channel not found during job processing", { channelId, messageId });
+      await messagesRepository.updateStatus(workspaceId, messageId, { status: "failed" });
+      emitToConversation(conversationId, "message:status", { messageId, conversationId, status: "failed" });
+      return;
+    }
+
+    const config = channel.config as WhatsAppChannelConfig;
+    if (!config.phone_number_id || !config.access_token) {
+      logger.error("WhatsApp: channel credentials missing during job processing", { channelId, messageId });
+      await messagesRepository.updateStatus(workspaceId, messageId, { status: "failed" });
+      emitToConversation(conversationId, "message:status", { messageId, conversationId, status: "failed" });
+      return;
+    }
 
     try {
-      const result = await sendWhatsAppText(phoneNumberId, accessToken, to, content);
+      const result = await sendWhatsAppText(config.phone_number_id, config.access_token, to, content);
 
       await messagesRepository.updateStatus(workspaceId, messageId, {
         status:      "sent",
@@ -250,26 +321,32 @@ export const whatsappService = {
     for (const s of statuses) {
       if (!["sent", "delivered", "read", "failed"].includes(s.status)) continue;
 
+      const incoming = s.status as "sent" | "delivered" | "read" | "failed";
       const msg = await messagesRepository.updateStatusByExternalId(
         workspaceId,
         s.id,
-        s.status as "sent" | "delivered" | "read" | "failed",
+        incoming,
       );
 
       if (!msg) {
-        logger.debug("WhatsApp: status update for unknown wamid", { wamid: s.id });
+        // Two possible reasons the UPDATE returned no row:
+        // 1. wamid not in DB yet (unknown message — log at warn)
+        // 2. transition guard blocked it (out-of-order event — log at debug)
+        logger.debug("WhatsApp: status event skipped (unknown wamid or out-of-order transition)", {
+          wamid: s.id, incoming,
+        });
         continue;
       }
 
       emitToConversation(msg.conversation_id, "message:status", {
         messageId:      msg.id,
         conversationId: msg.conversation_id,
-        status:         s.status,
+        status:         msg.status,
       });
 
       logger.debug("WhatsApp: status updated", {
         wamid:   s.id,
-        status:  s.status,
+        status:  msg.status,
         msgId:   msg.id,
       });
     }

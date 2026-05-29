@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { Request, Response } from "express";
 import { automationController } from "./automation.controller";
 import { authMiddleware } from "../../middleware/auth.middleware";
 import { tenantMiddleware } from "../../middleware/tenant.middleware";
@@ -14,5 +15,8 @@ automationRouter.post(  "/",               validate(CreateAutomationSchema),    
 automationRouter.patch( "/:id",            validate(UpdateAutomationSchema),           automationController.update);
 automationRouter.patch( "/:id/toggle",                                                 automationController.toggle);
 automationRouter.delete("/:id",                                                        automationController.delete);
-// Execution history — read-only, served from automation_executions table
-automationRouter.get(   "/:id/executions",                                             automationController.get); // TODO: dedicated executions handler
+// Execution history — not yet implemented; returns 501 until a dedicated handler is added
+// DO NOT map this to automationController.get — that returns the rule, not executions
+automationRouter.get("/:id/executions", (_req: Request, res: Response) => {
+  res.status(501).json({ success: false, error: "Execution history not yet implemented", code: "NOT_IMPLEMENTED" });
+});

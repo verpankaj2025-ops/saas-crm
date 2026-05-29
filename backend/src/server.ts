@@ -18,17 +18,22 @@ initSockets(server);
 
 async function start(): Promise<void> {
   try {
-    await redis.connect();
+    if (redis.status !== "connecting" && redis.status !== "ready") {
+      await redis.connect();
+    }
 
+    logger.info("Starting workers...");
     whatsappWorker   = startWhatsAppWorker();
     followupWorker    = startFollowupWorker();
     appointmentWorker = startAppointmentWorker();
+    logger.info("Workers started");
 
+    logger.info("Starting server...");
     server.listen(env.PORT, () => {
       logger.info(`🚀 CRM Backend running on port ${env.PORT} [${env.NODE_ENV}]`);
     });
   } catch (err) {
-    logger.error("Failed to start server", { err });
+    logger.error("Failed to start server", { err, message: (err as Error).message, stack: (err as Error).stack });
     process.exit(1);
   }
 }

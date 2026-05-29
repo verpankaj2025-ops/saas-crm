@@ -44,13 +44,12 @@ export type AiJobData = {
 };
 
 export type WhatsAppOutboundJobData = {
-  messageId: string;
+  messageId:      string;
   conversationId: string;
-  workspaceId: string;
-  phoneNumberId: string;   // from channel.config
-  accessToken: string;     // from channel.config (plain or decrypted)
-  to: string;              // E.164 recipient phone with leading +
-  content: string;         // text body
+  workspaceId:    string;
+  channelId:      string;  // worker fetches credentials from DB at execution time
+  to:             string;  // E.164 recipient phone with leading +
+  content:        string;  // text body
 };
 
 export type FollowupJobData = {

@@ -1,9 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { memoryService } from "./memory.service";
-import { validate } from "../../middleware/validate.middleware";
-import { sendSuccess, sendCreated } from "../../lib/response";
+import { sendSuccess } from "../../lib/response";
 import type { WorkspaceContext } from "../../types/common";
-import { UpdatePreferencesSchema, RefreshLeadScoreSchema, GenerateSummarySchema } from "./memory.validation";
 
 const ctx = (req: Request): WorkspaceContext => ({ workspaceId: req.workspaceId, userId: req.user.sub, role: req.user.role });
 

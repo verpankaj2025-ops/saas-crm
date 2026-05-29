@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { AppError, isAppError } from "../lib/errors";
+import { AppError, ValidationError, isAppError } from "../lib/errors";
 import { logger } from "../lib/logger";
 
 export function errorMiddleware(
@@ -12,11 +12,20 @@ export function errorMiddleware(
     if (err.statusCode >= 500) {
       logger.error(err.message, { stack: err.stack, path: req.path });
     }
-    res.status(err.statusCode).json({
+
+    const body: Record<string, unknown> = {
       success: false,
-      error: err.message,
-      code: err.code,
-    });
+      error:   err.message,
+      code:    err.code,
+    };
+
+    // Include per-field details for validation failures so clients
+    // can map errors back to form fields without a second round-trip.
+    if (err instanceof ValidationError && err.errors) {
+      body.errors = err.errors;
+    }
+
+    res.status(err.statusCode).json(body);
     return;
   }
 

@@ -9,6 +9,8 @@ import { logger } from "./lib/logger";
 import { errorMiddleware } from "./middleware/error.middleware";
 import { apiLimiter } from "./middleware/rate-limit.middleware";
 import { apiRouter } from "./routes";
+import { getHealthReport } from "./lib/health";
+import { whatsappRouter } from "./modules/whatsapp/whatsapp.routes";
 
 const app = express();
 
@@ -43,9 +45,16 @@ app.use(
 // ── Rate limiting ────────────────────────────────────────────
 app.use("/api", apiLimiter);
 
+// ── Webhooks (unversioned — external callers register these URLs) ───────────
+// IMPORTANT: Never nest under /api/v* — changing the version forces
+// re-registration with Meta / any external provider.
+app.use("/webhooks/whatsapp", whatsappRouter);
+
 // ── Health check ─────────────────────────────────────────────
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+app.get("/health", async (_req, res) => {
+  const report = await getHealthReport();
+  const httpStatus = report.status === "unhealthy" ? 503 : 200;
+  res.status(httpStatus).json(report);
 });
 
 // ── API routes ───────────────────────────────────────────────

@@ -259,21 +259,26 @@ export const contactsRepository = {
     phone: string,
     profileName: string,
   ): Promise<{ id: UUID; first_name: string; last_name: string | null }> {
-    const numericPhone = phone.replace(/\D/g, "");
+    // Strip all non-digits — matches the DB trigger normalization rule.
+    // "+91 98765 43210" → "919876543210"
+    const normalizedPhone = phone.replace(/\D/g, "");
+    if (!normalizedPhone) throw new Error(`findOrCreateByPhone: no digits in phone "${phone}"`);
 
-    // Match stored phone regardless of leading + (e.g. "+1555" or "1555")
+    // Exact-match lookup on the indexed normalized_phone column.
+    // The unique partial index (idx_contacts_normalized_phone) makes
+    // this O(log n) instead of the previous O(n) ILIKE table scan.
     const { data: existing } = await db
       .from("contacts")
       .select("id,first_name,last_name")
       .eq("workspace_id", workspaceId)
+      .eq("normalized_phone", normalizedPhone)
       .is("deleted_at", null)
-      .ilike("phone", `%${numericPhone}`)
-      .limit(1)
       .maybeSingle();
 
     if (existing) return existing as { id: UUID; first_name: string; last_name: string | null };
 
-    // Create new contact from WhatsApp profile
+    // Optimistic insert — create new contact from WhatsApp profile.
+    // normalized_phone is set automatically by trg_contacts_normalize_phone.
     const parts     = profileName.trim().split(/\s+/);
     const firstName = parts[0] ?? "Unknown";
     const lastName  = parts.slice(1).join(" ") || null;
@@ -284,13 +289,28 @@ export const contactsRepository = {
         workspace_id: workspaceId,
         first_name:   firstName,
         last_name:    lastName,
-        phone:        `+${numericPhone}`,
+        phone:        `+${normalizedPhone}`,
         source:       "whatsapp",
         status:       "lead",
       })
       .select("id,first_name,last_name")
       .single();
-    if (error) throw error;
-    return data as { id: UUID; first_name: string; last_name: string | null };
+
+    if (!error) return data as { id: UUID; first_name: string; last_name: string | null };
+
+    // Unique violation (error 23505): a concurrent process inserted the
+    // same phone between our SELECT and our INSERT. Fetch the winner.
+    if (error.code === "23505") {
+      const { data: raced } = await db
+        .from("contacts")
+        .select("id,first_name,last_name")
+        .eq("workspace_id", workspaceId)
+        .eq("normalized_phone", normalizedPhone)
+        .is("deleted_at", null)
+        .maybeSingle();
+      if (raced) return raced as { id: UUID; first_name: string; last_name: string | null };
+    }
+
+    throw error;
   },
 };

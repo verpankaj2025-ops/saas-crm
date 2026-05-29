@@ -3,6 +3,7 @@ import { aiService } from "./ai.service";
 import { sendSuccess, sendCreated, sendNoContent } from "../../lib/response";
 import type { WorkspaceContext } from "../../types/common";
 import type { SuggestionRequest } from "./ai.types";
+import type { SuggestionQueryInput } from "./ai.validation";
 
 const ctx = (req: Request): WorkspaceContext => ({ workspaceId: req.workspaceId, userId: req.user.sub, role: req.user.role });
 
@@ -31,18 +32,15 @@ export const aiController = {
 
   async getSuggestion(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const request: SuggestionRequest = {
-        conversation_id: req.params.id,
-        tone: (req.query.tone as SuggestionRequest["tone"]) || "professional",
-        force_ai: req.query.force_ai === "true",
-      };
+      const { tone, force_ai } = req.query as unknown as SuggestionQueryInput;
+      const request: SuggestionRequest = { conversation_id: req.params.id, tone, force_ai };
       sendSuccess(res, await aiService.getSuggestion(ctx(req), request));
     } catch (err) { next(err); }
   },
 
   async generateSuggestionDirect(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const tone = (req.query.tone as SuggestionRequest["tone"]) || "professional";
+      const { tone } = req.query as unknown as SuggestionQueryInput;
       const suggestion = await aiService.generateSuggestionDirect(ctx(req), req.params.id, tone);
       sendSuccess(res, { suggestion });
     } catch (err) { next(err); }
