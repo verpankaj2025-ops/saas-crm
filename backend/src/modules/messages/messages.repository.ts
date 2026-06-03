@@ -101,15 +101,17 @@ export const messagesRepository = {
     const { data: raw, error } = await db
       .from("messages")
       .insert({
-        workspace_id:    ctx.workspaceId,
-        conversation_id: dto.conversation_id,
-        sender_type:     dto.sender_type,
-        sender_id:       dto.sender_id,
-        content:         dto.content ?? null,
-        content_type:    dto.content_type ?? "text",
-        is_internal:     dto.is_internal ?? false,
-        status:          "queued",
-        queued_at:       now,
+        workspace_id:        ctx.workspaceId,
+        conversation_id:     dto.conversation_id,
+        sender_type:         dto.sender_type,
+        sender_id:           dto.sender_id,
+        content:             dto.content ?? null,
+        content_type:        dto.content_type ?? "text",
+        attachment_url:      dto.attachment_url ?? null,
+        attachment_metadata: dto.attachment_metadata ?? null,
+        is_internal:         dto.is_internal ?? false,
+        status:              "queued",
+        queued_at:           now,
       })
       .select(MSG_COLS)
       .single();
@@ -194,23 +196,27 @@ export const messagesRepository = {
       content: string | null;
       content_type: Message["content_type"];
       external_id: string;
+      attachment_url?: string | null;
+      attachment_metadata?: Record<string, unknown> | null;
     },
   ): Promise<Message> {
     const now = new Date().toISOString();
     const { data: raw, error } = await db
       .from("messages")
       .insert({
-        workspace_id:    workspaceId,
-        conversation_id: dto.conversation_id,
-        sender_type:     "contact",
-        sender_id:       null,
-        content:         dto.content,
-        content_type:    dto.content_type,
-        is_internal:     false,
-        status:          "sent",
-        external_id:     dto.external_id,
-        queued_at:       now,  // inbound: contact sent it, no queue phase on our side
-        sent_at:         now,
+        workspace_id:        workspaceId,
+        conversation_id:     dto.conversation_id,
+        sender_type:         "contact",
+        sender_id:           null,
+        content:             dto.content,
+        content_type:        dto.content_type,
+        attachment_url:      dto.attachment_url ?? null,
+        attachment_metadata: dto.attachment_metadata ?? null,
+        is_internal:         false,
+        status:              "sent",
+        external_id:         dto.external_id,
+        queued_at:           now,  // inbound: contact sent it, no queue phase on our side
+        sent_at:             now,
       })
       .select(MSG_COLS)
       .single();

@@ -30,6 +30,12 @@ export interface SendMessageDto {
   content_type?: Message["content_type"];
   content?: string;
   is_internal?: boolean;
+  // Media: a public URL the provider can fetch, plus optional metadata.
+  attachment_url?: string | null;
+  attachment_metadata?: Record<string, unknown> | null;
+  // Template send: reference an existing approved template + ordered/keyed vars.
+  template_id?: UUID;
+  template_variables?: Record<string, string>;
 }
 
 export interface MessageFilter {

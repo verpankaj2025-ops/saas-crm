@@ -33,6 +33,13 @@ export const conversationsService = {
   async markRead(ctx: WorkspaceContext, id: string): Promise<ConversationWithContact> {
     const conv = await conversationsRepository.markRead(ctx, id);
     if (!conv) throw new NotFoundError("Conversation");
+    // Lightweight event so other tabs/clients can sync the unread badge,
+    // plus the full row for views that re-render the conversation.
+    emitToWorkspace(ctx.workspaceId, "conversation:read", {
+      conversationId: id,
+      unread_count:   0,
+      readBy:         ctx.userId,
+    });
     emitToWorkspace(ctx.workspaceId, "conversation:updated", conv);
     return conv;
   },

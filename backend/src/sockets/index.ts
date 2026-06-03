@@ -3,6 +3,7 @@ import type { Server as HttpServer } from "http";
 import { verifyAccessToken } from "../lib/jwt";
 import { logger } from "../lib/logger";
 import { env } from "../config/env";
+import { getOnlineUsers, markUserOnline, markUserOffline } from "./presence";
 
 // ── Security / tuning constants ───────────────────────────────
 
@@ -82,10 +83,15 @@ function sessionCount(userId: string): number {
 
 // ── Full socket cleanup ───────────────────────────────────────
 
-function cleanupSocket(userId: string, socketId: string): void {
+function cleanupSocket(workspaceId: string, userId: string, socketId: string): void {
   rateLimiterStore.delete(socketId);
   socketConvRooms.delete(socketId);
   unregisterSession(userId, socketId);
+
+  // Last live socket for this user → announce offline to the workspace.
+  if (sessionCount(userId) === 0 && markUserOffline(workspaceId, userId)) {
+    emitToWorkspace(workspaceId, "presence:offline", { userId, workspaceId });
+  }
 }
 
 // ── Per-socket connection handler ─────────────────────────────
@@ -110,6 +116,14 @@ function handleConnection(socket: Socket): void {
 
   // Ack the client so it knows it can start emitting join events.
   socket.emit("connected", { socketId: socket.id });
+
+  // ── Presence ──────────────────────────────────────────────
+  // Announce online to the rest of the workspace only on the first tab,
+  // then send this tab the current online snapshot (includes self).
+  if (markUserOnline(workspaceId, userId)) {
+    socket.to(`workspace:${workspaceId}`).emit("presence:online", { userId, workspaceId });
+  }
+  socket.emit("presence:sync", { online: getOnlineUsers(workspaceId) });
 
   // ── conversation:join ───────────────────────────────────
   socket.on("conversation:join", (conversationId: unknown) => {
@@ -161,6 +175,59 @@ function handleConnection(socket: Socket): void {
     logger.debug("Socket: left conversation room", { userId, conversationId });
   });
 
+  // ── typing:start / typing:stop ──────────────────────────
+  // Relayed to other members of the conversation room (sender excluded).
+  const relayTyping = (conversationId: unknown, isTyping: boolean): void => {
+    if (!checkRateLimit(socket.id)) {
+      socket.emit("error", { code: "RATE_LIMITED", message: "Too many requests — slow down" });
+      return;
+    }
+    if (!isUUID(conversationId)) {
+      socket.emit("error", { code: "INVALID_PAYLOAD", message: "conversationId must be a valid UUID" });
+      return;
+    }
+    // Only relay typing for rooms this socket has actually joined.
+    if (!getConvRooms(socket.id).has(conversationId)) {
+      socket.emit("error", { code: "NOT_IN_ROOM", message: "Join the conversation before typing" });
+      return;
+    }
+    socket.to(`conversation:${conversationId}`).emit("typing:update", {
+      conversationId,
+      userId,
+      isTyping,
+    });
+  };
+
+  socket.on("typing:start", (conversationId: unknown) => relayTyping(conversationId, true));
+  socket.on("typing:stop",  (conversationId: unknown) => relayTyping(conversationId, false));
+
+  // ── conversation:read — clear unread + sync across tabs/workspace ──
+  socket.on("conversation:read", (conversationId: unknown) => {
+    if (!checkRateLimit(socket.id)) {
+      socket.emit("error", { code: "RATE_LIMITED", message: "Too many requests — slow down" });
+      return;
+    }
+    if (!isUUID(conversationId)) {
+      socket.emit("error", { code: "INVALID_PAYLOAD", message: "conversationId must be a valid UUID" });
+      return;
+    }
+
+    // Persist + broadcast via the conversations service. Lazy import avoids a
+    // circular dependency (the service imports the socket emit helpers).
+    void (async () => {
+      try {
+        const { conversationsService } = await import("../modules/conversations/conversations.service");
+        await conversationsService.markRead(
+          { workspaceId, userId, role: socket.data.user.role as string },
+          conversationId,
+        );
+      } catch (err) {
+        logger.error("Socket: conversation:read failed", { userId, conversationId, err });
+        socket.emit("error", { code: "READ_FAILED", message: "Could not mark conversation read" });
+      }
+    })();
+  });
+
   // ── socket-level error ──────────────────────────────────
   socket.on("error", (err: Error) => {
     logger.error("Socket error", { userId, socketId: socket.id, message: err.message });
@@ -172,7 +239,7 @@ function handleConnection(socket: Socket): void {
   // (server-initiated), "client namespace disconnect" (clean client close), etc.
   socket.on("disconnect", (reason: string) => {
     const roomsHeld = getConvRooms(socket.id).size;
-    cleanupSocket(userId, socket.id);
+    cleanupSocket(workspaceId, userId, socket.id);
 
     logger.info("Socket disconnected", {
       userId,
