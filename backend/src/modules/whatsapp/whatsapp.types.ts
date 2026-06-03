@@ -54,11 +54,25 @@ export interface WhatsAppMessage {
     | "system"
     | "unknown";
   text?: { body: string };
-  // Media types — handled in future
-  image?:    { id: string; mime_type: string; caption?: string };
-  audio?:    { id: string; mime_type: string };
-  video?:    { id: string; mime_type: string; caption?: string };
-  document?: { id: string; mime_type: string; filename?: string; caption?: string };
+  // Media payloads — each carries a media `id` resolved via the Graph media endpoint.
+  image?:    { id: string; mime_type: string; caption?: string; sha256?: string };
+  audio?:    { id: string; mime_type: string; sha256?: string };
+  video?:    { id: string; mime_type: string; caption?: string; sha256?: string };
+  document?: { id: string; mime_type: string; filename?: string; caption?: string; sha256?: string };
+  sticker?:  { id: string; mime_type: string; sha256?: string; animated?: boolean };
+}
+
+// Inbound media kinds we download + persist. Excludes text/location/etc.
+export type WhatsAppMediaType = "image" | "audio" | "video" | "document" | "sticker";
+
+// Response of GET /{media-id} — the temporary, auth-gated download URL plus metadata.
+export interface WhatsAppMediaInfo {
+  url: string;            // short-lived URL, must be fetched with the Bearer token
+  mime_type: string;
+  sha256?: string;
+  file_size?: number;
+  id: string;
+  messaging_product?: "whatsapp";
 }
 
 export interface WhatsAppStatus {

@@ -6,8 +6,19 @@ import { whatsappQueue } from "../../queues";
 import { contactsRepository } from "../contacts/contacts.repository";
 import { conversationsRepository } from "../conversations/conversations.repository";
 import { messagesRepository } from "../messages/messages.repository";
-import { sendWhatsAppText, WhatsAppApiError } from "./whatsapp.client";
+import {
+  sendWhatsAppText,
+  sendWhatsAppMedia,
+  sendWhatsAppTemplate,
+  getMediaUrl,
+  downloadMedia,
+  WhatsAppApiError,
+  type OutboundMediaType,
+} from "./whatsapp.client";
+import { buildMediaPath, uploadInboundMedia } from "./whatsapp.storage";
+import { extractMedia, mediaContentType } from "./whatsapp.inbound";
 import type { WhatsAppOutboundJobData } from "../../queues";
+import type { Message } from "../messages/messages.types";
 import type {
   WhatsAppWebhookBody,
   WhatsAppValue,
@@ -119,6 +130,7 @@ async function processMessage(
   channelId: string,
   wamsg: WhatsAppMessage,
   value: WhatsAppValue,
+  accessToken: string | undefined,
 ): Promise<void> {
   // ── Layer 1: Redis idempotency lock ───────────────────────────
   // Acquire before any DB work. If the lock is already held, another
@@ -166,17 +178,59 @@ async function processMessage(
 
   const conversationId = convRow.id;
 
-  // Extract text content (only text messages for now)
-  const content = wamsg.type === "text" ? (wamsg.text?.body ?? null) : null;
+  // ── Resolve content + any media attachment ──────────────────
+  let content: string | null = wamsg.type === "text" ? (wamsg.text?.body ?? null) : null;
+  let contentType: Message["content_type"] = "text";
+  let attachmentUrl: string | null = null;
+  let attachmentMetadata: Record<string, unknown> | null = null;
+
+  const media = extractMedia(wamsg);
+  if (media) {
+    contentType = mediaContentType(media.type);
+    content     = media.caption; // caption (if present) is the visible text
+    attachmentMetadata = {
+      wa_media_id: media.mediaId,
+      wa_type:     media.type,
+      mime_type:   media.mime,
+      filename:    media.filename,
+      caption:     media.caption,
+    };
+
+    // Download from Meta + re-host in Supabase Storage. On failure we still
+    // persist the message (without a usable URL) so the inbound is not lost.
+    if (accessToken) {
+      try {
+        const info     = await getMediaUrl(media.mediaId, accessToken);
+        const download = await downloadMedia(info.url, accessToken, media.mime);
+        const path     = buildMediaPath(workspaceId, conversationId, wamsg.id, info.mime_type || media.mime);
+        attachmentUrl  = await uploadInboundMedia({
+          path,
+          buffer:      download.buffer,
+          contentType: download.contentType,
+        });
+        attachmentMetadata.size = info.file_size ?? download.buffer.length;
+      } catch (err) {
+        logger.error("WhatsApp: inbound media download/store failed", {
+          wamid: wamsg.id, mediaId: media.mediaId, err,
+        });
+        attachmentMetadata.download_error = err instanceof Error ? err.message : String(err);
+      }
+    } else {
+      logger.warn("WhatsApp: no access token for media download", { wamid: wamsg.id, channelId });
+      attachmentMetadata.download_error = "no_access_token";
+    }
+  }
 
   // Save inbound message
   const message = await messagesRepository.createInbound(workspaceId, {
-    conversation_id: conversationId,
+    conversation_id:     conversationId,
     content,
-    content_type:    "text",
-    external_id:     wamsg.id,
+    content_type:        contentType,
+    external_id:         wamsg.id,
+    attachment_url:      attachmentUrl,
+    attachment_metadata: attachmentMetadata,
   });
-  logger.info("WhatsApp: message saved", { wamid: wamsg.id, messageId: message.id });
+  logger.info("WhatsApp: message saved", { wamid: wamsg.id, messageId: message.id, contentType });
 
   // Auto-cancel pending follow-ups when customer replies
   try {
@@ -219,6 +273,12 @@ export const whatsappService = {
     channelId:      string;
     contactPhone:   string;   // raw phone from contact record
     content:        string;
+    // Optional media/template delivery fields (text remains the default).
+    content_type?:  Message["content_type"];
+    attachmentUrl?: string | null;
+    caption?:       string | null;
+    filename?:      string | null;
+    template?:      WhatsAppOutboundJobData["template"];
   }): Promise<void> {
     const channel = await findChannelById(opts.channelId, opts.workspaceId);
     if (!channel || channel.type !== "whatsapp" || !channel.is_active) {
@@ -236,6 +296,13 @@ export const whatsappService = {
       return;
     }
 
+    // Only text/media/template are deliverable; anything else (e.g. interactive) → text.
+    const deliverable = new Set(["image", "audio", "video", "document", "template"]);
+    const jobContentType: WhatsAppOutboundJobData["content_type"] =
+      opts.content_type && deliverable.has(opts.content_type)
+        ? (opts.content_type as WhatsAppOutboundJobData["content_type"])
+        : "text";
+
     // Credentials are NOT stored in the job payload — worker resolves them from DB
     const jobData: WhatsAppOutboundJobData = {
       messageId:      opts.messageId,
@@ -244,16 +311,25 @@ export const whatsappService = {
       channelId:      opts.channelId,
       to:             normalizePhone(opts.contactPhone),
       content:        opts.content,
+      content_type:   jobContentType,
+      attachment_url: opts.attachmentUrl ?? undefined,
+      caption:        opts.caption ?? undefined,
+      filename:       opts.filename ?? undefined,
+      template:       opts.template,
     };
 
-    await whatsappQueue.add("send-text", jobData, {
+    const jobName = opts.template ? "send-template"
+      : jobContentType !== "text" ? "send-media"
+      : "send-text";
+
+    await whatsappQueue.add(jobName, jobData, {
       attempts:    3,
       backoff:     { type: "exponential", delay: 3_000 },
       removeOnComplete: { count: 500 },
       removeOnFail:     { count: 200 },
     });
 
-    logger.debug("WhatsApp: outbound job enqueued", { messageId: opts.messageId });
+    logger.debug("WhatsApp: outbound job enqueued", { messageId: opts.messageId, jobName });
   },
 
   // ── Outbound: actual send (called by BullMQ worker) ───────
@@ -278,8 +354,28 @@ export const whatsappService = {
       return;
     }
 
+    const { phone_number_id: pn, access_token: token } = config;
+    const mediaType: OutboundMediaType | null =
+      job.content_type && ["image", "audio", "video", "document"].includes(job.content_type)
+        ? (job.content_type as OutboundMediaType)
+        : null;
+
     try {
-      const result = await sendWhatsAppText(config.phone_number_id, config.access_token, to, content);
+      let result;
+      if (job.template) {
+        result = await sendWhatsAppTemplate(
+          pn, token, to, job.template.name, job.template.language, job.template.params,
+        );
+      } else if (mediaType) {
+        if (!job.attachment_url) {
+          throw new WhatsAppApiError("media message missing attachment_url", 131051, 0);
+        }
+        result = await sendWhatsAppMedia(
+          pn, token, to, mediaType, job.attachment_url, job.caption ?? undefined, job.filename ?? undefined,
+        );
+      } else {
+        result = await sendWhatsAppText(pn, token, to, content);
+      }
 
       await messagesRepository.updateStatus(workspaceId, messageId, {
         status:      "sent",
@@ -293,9 +389,10 @@ export const whatsappService = {
         external_id: result.wamid,
       });
 
-      logger.info("WhatsApp: outbound message sent", { messageId, wamid: result.wamid });
+      logger.info("WhatsApp: outbound message sent", { messageId, wamid: result.wamid, kind: job.template ? "template" : mediaType ?? "text" });
     } catch (err) {
       const isPermanent = err instanceof WhatsAppApiError && err.isPermanent;
+      const errorCode   = err instanceof WhatsAppApiError ? err.apiCode : undefined;
 
       await messagesRepository.updateStatus(workspaceId, messageId, { status: "failed" });
 
@@ -303,6 +400,8 @@ export const whatsappService = {
         messageId,
         conversationId,
         status: "failed",
+        error:  err instanceof Error ? err.message : String(err),
+        code:   errorCode,
       });
 
       logger.error("WhatsApp: outbound message failed", { messageId, err });
@@ -338,11 +437,22 @@ export const whatsappService = {
         continue;
       }
 
+      // For failed receipts, surface Meta's error code/title in the socket
+      // event (and logs) — not persisted, no schema column for it.
+      const failure = incoming === "failed" ? s.errors?.[0] : undefined;
+
       emitToConversation(msg.conversation_id, "message:status", {
         messageId:      msg.id,
         conversationId: msg.conversation_id,
         status:         msg.status,
+        ...(failure ? { error: failure.title, code: failure.code } : {}),
       });
+
+      if (failure) {
+        logger.warn("WhatsApp: message delivery failed", {
+          wamid: s.id, msgId: msg.id, code: failure.code, title: failure.title,
+        });
+      }
 
       logger.debug("WhatsApp: status updated", {
         wamid:   s.id,
@@ -370,11 +480,12 @@ export const whatsappService = {
         }
 
         const { id: channelId, workspace_id: workspaceId } = channel;
+        const accessToken = (channel.config as WhatsAppChannelConfig | null)?.access_token;
 
         // Process each inbound message in this change
         for (const wamsg of value.messages ?? []) {
           try {
-            await processMessage(workspaceId, channelId, wamsg, value);
+            await processMessage(workspaceId, channelId, wamsg, value, accessToken);
           } catch (err) {
             logger.error("WhatsApp: failed to process message", { wamid: wamsg.id, err });
             // Continue with next message rather than failing the whole batch
