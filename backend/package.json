@@ -6,6 +6,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node dist/server.js",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "lint": "eslint src --ext .ts",
     "pm2:start": "pm2 start ecosystem.config.js",
     "pm2:stop": "pm2 stop ecosystem.config.js",

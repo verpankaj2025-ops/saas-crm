@@ -16,7 +16,7 @@ export const MemoryQuerySchema = z.object({
 });
 
 export const SuggestionQuerySchema = z.object({
-  tone:     z.enum(["professional", "friendly", "formal", "casual"]).default("professional"),
+  tone:     z.enum(["professional", "friendly", "premium"]).default("professional"),
   force_ai: z.coerce.boolean().default(false),
 });
 
