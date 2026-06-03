@@ -49,7 +49,17 @@ export type WhatsAppOutboundJobData = {
   workspaceId:    string;
   channelId:      string;  // worker fetches credentials from DB at execution time
   to:             string;  // E.164 recipient phone with leading +
-  content:        string;  // text body
+  content:        string;  // text body / caption fallback / rendered template body
+  // ── Media/template delivery (text remains the default) ──────
+  content_type?:  "text" | "image" | "audio" | "video" | "document" | "template";
+  attachment_url?: string;  // public link sent to Meta for media messages
+  caption?:        string;  // optional caption for image/video/document
+  filename?:       string;  // optional document filename
+  template?: {
+    name:     string;        // approved template name (channels' external_id)
+    language: string;        // BCP-47 language code, e.g. "en_US"
+    params:   string[];      // ordered body parameter values
+  };
 };
 
 export type FollowupJobData = {
