@@ -15,8 +15,11 @@
 -- Usage (Supabase):
 --   Paste into the SQL Editor and run.
 --
--- Safe to run inside a single transaction (no CONCURRENTLY).
+-- Wrapped in a single transaction (no CONCURRENTLY) so a partial
+-- failure leaves the database unchanged. Run once per environment.
 -- ============================================================
+
+BEGIN;
 
 -- Lead lifecycle status (spa/clinic workflow).
 CREATE TYPE lead_status AS ENUM
@@ -62,3 +65,5 @@ CREATE INDEX idx_leads_created   ON leads (workspace_id, created_at DESC) WHERE 
 CREATE TRIGGER trg_leads_updated_at
   BEFORE UPDATE ON leads
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+COMMIT;

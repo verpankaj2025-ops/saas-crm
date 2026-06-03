@@ -7,6 +7,21 @@ const LEAD_COLS =
   "amount,paid_amount,balance_amount,status,assigned_agent,notes,created_by," +
   "created_at,updated_at,deleted_at";
 
+// Columns a client is allowed to mutate via update(). Excludes id,
+// workspace_id, contact_id, balance_amount (generated), created_by and
+// all timestamps so they can never be reassigned through the payload.
+const UPDATABLE_COLS = [
+  "conversation_id", "channel_id", "source", "package",
+  "amount", "paid_amount", "status", "assigned_agent", "notes",
+] as const;
+
+// PostgREST `.or()` treats , . : () as structural. Wrap the value in
+// double quotes and escape backslash/quote so a search term cannot inject
+// extra filter conditions.
+export function quoteOrValue(s: string): string {
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 export const leadsRepository = {
   async findAll(ctx: WorkspaceContext, filter: LeadFilter): Promise<ListResult<Lead>> {
     const page = filter.page ?? 1;
@@ -25,7 +40,10 @@ export const leadsRepository = {
     if (filter.source)         query = query.eq("source", filter.source);
     if (filter.assigned_agent) query = query.eq("assigned_agent", filter.assigned_agent);
     if (filter.contact_id)     query = query.eq("contact_id", filter.contact_id);
-    if (filter.search)         query = query.or(`package.ilike.%${filter.search}%,notes.ilike.%${filter.search}%`);
+    if (filter.search) {
+      const v = quoteOrValue(`%${filter.search}%`);
+      query = query.or(`package.ilike.${v},notes.ilike.${v}`);
+    }
 
     const { data, count, error } = await query;
     if (error) throw error;
@@ -67,9 +85,17 @@ export const leadsRepository = {
   },
 
   async update(ctx: WorkspaceContext, id: UUID, dto: UpdateLeadDto): Promise<Lead> {
+    // Whitelist columns — never trust the raw payload to set id/workspace_id/etc.
+    const patch: Record<string, unknown> = {};
+    for (const col of UPDATABLE_COLS) {
+      if (Object.prototype.hasOwnProperty.call(dto, col)) {
+        patch[col] = (dto as Record<string, unknown>)[col];
+      }
+    }
+
     const { data, error } = await db
       .from("leads")
-      .update(dto)
+      .update(patch)
       .eq("id", id)
       .eq("workspace_id", ctx.workspaceId)
       .is("deleted_at", null)
