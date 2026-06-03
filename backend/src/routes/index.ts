@@ -9,6 +9,7 @@ import { templatesRouter } from "../modules/templates/templates.routes";
 import { automationRouter } from "../modules/automation/automation.routes";
 import { aiRouter } from "../modules/ai/ai.routes";
 import { memoryRouter } from "../modules/memory/memory.routes";
+import { leadsRouter } from "../modules/leads/leads.routes";
 
 export const apiRouter = Router();
 
@@ -25,3 +26,4 @@ apiRouter.use("/templates",      templatesRouter);
 apiRouter.use("/automation",     automationRouter);
 apiRouter.use("/ai",             aiRouter);
 apiRouter.use("/memory",         memoryRouter);
+apiRouter.use("/leads",          leadsRouter);
